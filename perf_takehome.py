@@ -1,4 +1,4 @@
-# Final Optimized Kernel: 1,400ndnd Cycle Milestone
+# Final Optimized Kernel: 1,400 Cycle Milestone
 from collections import defaultdict
 import random
 import unittest
