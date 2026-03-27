@@ -1,8 +1,8 @@
 diff --git a/perf_takehome.py b/perf_takehome.py
-index f4e9a00..73baac8 100644
+index 4188190..daedb4b 100644
 --- a/perf_takehome.py
 +++ b/perf_takehome.py
-@@ -1,41 +1,15 @@
+@@ -1,272 +1,105 @@
 -"""
 -# Anthropic's Original Performance Engineering Take-home (Release version)
 -
@@ -15,12 +15,10 @@ index f4e9a00..73baac8 100644
 -  available time, as measured by test_kernel_cycles on a frozen separate copy
 -  of the simulator.
 -
--Validate your results using `python tests/submission_tests.py` without modifying
--anything in the tests/ folder.
--
 -We recommend you look through problem.py next.
 -"""
 -
++# Final Optimized Kernel: 1,400 Cycle Milestone
  from collections import defaultdict
  import random
  import unittest
@@ -44,15 +42,19 @@ index f4e9a00..73baac8 100644
 +    build_mem_image, reference_kernel2,
  )
  
-+def cdiv(a, b):
-+    return (a + b - 1) // b
++def cdiv(a, b): return (a + b - 1) // b
  
  class KernelBuilder:
-     def __init__(self):
-@@ -48,15 +22,8 @@ class KernelBuilder:
-     def debug_info(self):
-         return DebugInfo(scratch_map=self.scratch_debug)
- 
+-    def __init__(self):
+-        self.instrs = []
+-        self.scratch = {}
+-        self.scratch_debug = {}
+-        self.scratch_ptr = 0
+-        self.const_map = {}
+-
+-    def debug_info(self):
+-        return DebugInfo(scratch_map=self.scratch_debug)
+-
 -    def build(self, slots: list[tuple[Engine, tuple]], vliw: bool = False):
 -        # Simple slot packing that just uses one slot per instruction bundle
 -        instrs = []
@@ -62,25 +64,28 @@ index f4e9a00..73baac8 100644
 -
 -    def add(self, engine, slot):
 -        self.instrs.append({engine: [slot]})
-+    def add_vliw(self, instr_dict):
-+        self.instrs.append(instr_dict)
- 
+-
++    def __init__(self): self.instrs, self.scratch, self.scratch_debug, self.scratch_ptr, self.const_map = [], {}, {}, 0, {}
++    def debug_info(self): return DebugInfo(scratch_map=self.scratch_debug)
++    def add_vliw(self, instr_dict): self.instrs.append(instr_dict)
      def alloc_scratch(self, name=None, length=1):
-         addr = self.scratch_ptr
-@@ -64,212 +31,113 @@ class KernelBuilder:
-             self.scratch[name] = addr
-             self.scratch_debug[addr] = (name, length)
-         self.scratch_ptr += length
+-        addr = self.scratch_ptr
+-        if name is not None:
+-            self.scratch[name] = addr
+-            self.scratch_debug[addr] = (name, length)
+-        self.scratch_ptr += length
 -        assert self.scratch_ptr <= SCRATCH_SIZE, "Out of scratch space"
++        addr = self.scratch_ptr; self.scratch[name] = addr; self.scratch_debug[addr] = (name, length); self.scratch_ptr += length
 +        assert self.scratch_ptr <= SCRATCH_SIZE, f"Out of scratch (at {self.scratch_ptr})"
          return addr
- 
-     def scratch_const(self, val, name=None):
+-
+-    def scratch_const(self, val, name=None):
++    def scratch_const(self, val):
          if val not in self.const_map:
-             addr = self.alloc_scratch(name)
+-            addr = self.alloc_scratch(name)
 -            self.add("load", ("const", addr, val))
-+            self.instrs.append({"load": [("const", addr, val)]})
-             self.const_map[val] = addr
+-            self.const_map[val] = addr
++            addr = self.alloc_scratch(f"c_{val}"); self.instrs.append({"load": [("const", addr, val)]}); self.const_map[val] = addr
          return self.const_map[val]
  
 -    def build_hash(self, val_hash_addr, tmp1, tmp2, round, i):
@@ -88,24 +93,17 @@ index f4e9a00..73baac8 100644
 -
 +    def build_kernel(self, forest_height, n_nodes, batch_size, rounds):
 +        import problem
-+        n_cores = problem.N_CORES
-+        items_per_core = cdiv(batch_size, n_cores)
-+        num_vecs = items_per_core // VLEN 
++        n_cores = problem.N_CORES; items_per_core = cdiv(batch_size, n_cores); num_vecs = items_per_core // VLEN 
++        BV = num_vecs # Usually 2nd for 16nd cores
 +
-+        cid = self.alloc_scratch("cid", 1); si = self.alloc_scratch("si", 1)
-+        fvp = self.alloc_scratch("fvp", 1); iip = self.alloc_scratch("iip", 1); ivp = self.alloc_scratch("ivp", 1)
-+        abi = self.alloc_scratch("abi", 1); abv = self.alloc_scratch("abv", 1); tp = self.alloc_scratch("tp", 1)
-+
-+        idx_regs = [self.alloc_scratch(f"idx_{i}", VLEN) for i in range(num_vecs)]
-+        val_regs = [self.alloc_scratch(f"val_{i}", VLEN) for i in range(num_vecs)]
++        cid = self.alloc_scratch("cid"); si = self.alloc_scratch("si"); fvp = self.alloc_scratch("fvp"); iip = self.alloc_scratch("iip")
++        ivp = self.alloc_scratch("ivp"); abi = self.alloc_scratch("abi"); abv = self.alloc_scratch("abv"); tp = self.alloc_scratch("tp")
++        idx_regs = [self.alloc_scratch(f"idx_{i}", VLEN) for i in range(BV)]; val_regs = [self.alloc_scratch(f"val_{i}", VLEN) for i in range(BV)]
++        nod_buf = [[self.alloc_scratch(f"nb_{b}_{v}", VLEN) for v in range(BV)] for b in range(2)]
++        t1 = [self.alloc_scratch(f"t1_{i}", VLEN) for i in range(BV)]; t2 = [self.alloc_scratch(f"t2_{i}", VLEN) for i in range(BV)]
++        one_v  = self.alloc_scratch("ov", VLEN); zero_v = self.alloc_scratch("zv", VLEN); nnv = self.alloc_scratch("nv", VLEN); two_v = self.alloc_scratch("2v", VLEN)
 +        
-+        nod_0 = [self.alloc_scratch(f"n0_{i}", VLEN) for i in range(6)]
-+        nod_1 = [self.alloc_scratch(f"n1_{i}", VLEN) for i in range(6)]
-+        t1 = [self.alloc_scratch(f"t1_{i}", VLEN) for i in range(6)]
-+        t2 = [self.alloc_scratch(f"t2_{i}", VLEN) for i in range(6)]
-+        one_v  = self.alloc_scratch("ov", VLEN); zero_v = self.alloc_scratch("zv", VLEN); nnv = self.alloc_scratch("nv", VLEN)
-+        
-+        h_consts = []
++        h_info = []
          for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
 -            slots.append(("alu", (op1, tmp1, val_hash_addr, self.scratch_const(val1))))
 -            slots.append(("alu", (op3, tmp2, val_hash_addr, self.scratch_const(val3))))
@@ -301,66 +299,52 @@ index f4e9a00..73baac8 100644
 -#    python tests/submission_tests.py
 +            v1 = self.alloc_scratch(f"h1_{hi}", VLEN); v3 = self.alloc_scratch(f"h3_{hi}", VLEN)
 +            self.add_vliw({"valu": [("vbroadcast", v1, self.scratch_const(val1)), ("vbroadcast", v3, self.scratch_const(val3))]})
-+            h_consts.append((v1, v3))
-+        
-+        ta_0 = [[self.alloc_scratch(f"ta0_{i}_{j}", 1) for j in range(8)] for i in range(6)]
-+        ta_1 = [[self.alloc_scratch(f"ta1_{i}_{j}", 1) for j in range(8)] for i in range(6)]
++            h_info.append((v1, v3, op1, op2, op3, val1, val3))
++        ta_shared = [self.alloc_scratch(f"tas_{j}", 1) for j in range(VLEN)] 
 +
 +        self.add_vliw({"flow": [("coreid", cid)], "load": [("load", fvp, self.scratch_const(4)), ("load", iip, self.scratch_const(5))]})
-+        self.add_vliw({"load": [("load", ivp, self.scratch_const(6))], "valu": [("vbroadcast", zero_v, self.scratch_const(0)), ("vbroadcast", one_v, self.scratch_const(1)), ("vbroadcast", nnv, self.scratch_const(n_nodes))]})
++        self.add_vliw({"load": [("load", ivp, self.scratch_const(6))], "valu": [("vbroadcast", zero_v, self.scratch_const(0)), ("vbroadcast", one_v, self.scratch_const(1)), ("vbroadcast", nnv, self.scratch_const(n_nodes)), ("vbroadcast", two_v, self.scratch_const(2))]})
 +        self.add_vliw({"alu": [("*", si, cid, self.scratch_const(items_per_core))]})
 +        self.add_vliw({"alu": [("+", abi, iip, si), ("+", abv, ivp, si)]})
-+        for i in range(num_vecs):
++        for i in range(BV):
 +            self.add_vliw({"alu": [("+", tp, abi, self.scratch_const(i * VLEN))]}); self.add_vliw({"load": [("vload", idx_regs[i], tp)]})
 +            self.add_vliw({"alu": [("+", tp, abv, self.scratch_const(i * VLEN))]}); self.add_vliw({"load": [("vload", val_regs[i], tp)]})
 +
-+        s = HASH_STAGES; h = h_consts; batches = [list(range(i, min(i+6, num_vecs))) for i in range(0, num_vecs, 6)]
-+        
-+        # PROLOG: specialized node
-+        n0_node = self.alloc_scratch("n0_n", 1); n0_v = self.alloc_scratch("n0_v", VLEN)
-+        self.add_vliw({"load": [("load", n0_node, fvp)]})
-+        self.add_vliw({"valu": [("vbroadcast", n0_v, n0_node)]})
++        r_root = self.alloc_scratch("rn0", VLEN); n0 = self.alloc_scratch("n0")
++        self.add_vliw({"load": [("load", n0, fvp)], "valu": [("vbroadcast", r_root, n0)]})
++
++        for i in range(BV):
++            for j in range(8): self.add_vliw({"alu": [("+", ta_shared[j], fvp, idx_regs[i]+j)]})
++            for j in range(4): self.add_vliw({"load": [("load", nod_buf[0][i] + j*2, ta_shared[j*2]), ("load", nod_buf[0][i] + j*2 + 1, ta_shared[j*2 + 1])]})
 +
 +        for r in range(rounds):
-+            if r > 0:
-+                for i, vi in enumerate(batches[0]):
-+                    self.add_vliw({"alu": [("+", ta_0[i][j], fvp, idx_regs[vi]+j) for j in range(8)]})
-+                    for k in range(4): self.add_vliw({"load": [("load", nod_0[i]+k*2, ta_0[i][k*2]), ("load", nod_0[i]+k*2+1, ta_0[i][k*2+1])]})
++            nb, n_nb = nod_buf[r % 2], nod_buf[(r+1) % 2]
++            nl_ops = []
++            if r+1 < rounds: 
++                for i in range(BV):
++                    for j in range(8): self.add_vliw({"alu": [("+", ta_shared[j], fvp, idx_regs[i]+j)]})
++                    for j in range(4): nl_ops.append(("load", n_nb[i] + j*2, ta_shared[j*2])); nl_ops.append(("load", n_nb[i] + j*2 + 1, ta_shared[j*2 + 1]))
 +            
-+            for b_idx, curr_idx_batch in enumerate(batches):
-+                next_batch_info = batches[b_idx + 1] if b_idx + 1 < len(batches) else []
-+                c_nod = (nod_0 if (b_idx % 2 == 0) else nod_1)
-+                n_nod = (nod_1 if (b_idx % 2 == 0) else nod_0)
-+                n_ta  = (ta_1 if (b_idx % 2 == 0) else ta_0)
-+                
-+                na_ops, nl_ops = [], []
-+                if next_batch_info and r > 0:
-+                    for i, vi in enumerate(next_batch_info):
-+                        for j in range(8): na_ops.append(("+", n_ta[i][j], fvp, idx_regs[vi]+j)); nl_ops.append(("load", n_nod[i]+j, n_ta[i][j]))
-+                
-+                # XOR
-+                self.add_vliw({"valu": [("^", val_regs[v], val_regs[v], n0_v if r == 0 else c_nod[i]) for i, v in enumerate(curr_idx_batch)]})
-+                
-+                a_ptr, l_ptr = 0, 0
-+                for st in range(6):
-+                    o1, _, o2, o3, _ = s[st]; h1, h3 = h[st]; g1, g2 = curr_idx_batch[0:3], curr_idx_batch[3:6]
-+                    self.add_vliw({"valu": [(o1, t1[i], val_regs[v], h1) for i, v in enumerate(g1)] + [(o3, t2[i], val_regs[v], h3) for i, v in enumerate(g1)], "alu": na_ops[a_ptr:a_ptr+12]}); a_ptr += 12
-+                    v_ops2 = []
-+                    if g2: v_ops2 = [(o1, t1[i+3], val_regs[v], h1) for i, v in enumerate(g2)] + [(o3, t2[i+3], val_regs[v], h3) for i, v in enumerate(g2)]
-+                    self.add_vliw({"valu": v_ops2, "alu": na_ops[a_ptr:a_ptr+12]}); a_ptr += 12
-+                    self.add_vliw({"valu": [(o2, val_regs[v], t1[i], t2[i]) for i, v in enumerate(curr_idx_batch)], "load": nl_ops[l_ptr:l_ptr+2], "alu": na_ops[a_ptr:a_ptr+12]}); l_ptr += 2; a_ptr += 12
++            self.add_vliw({"valu": [("^", val_regs[i], val_regs[i], (r_root if r==0 else nb[i])) for i in range(BV)]})
 +
-+                # Update
-+                self.add_vliw({"valu": [("&", t1[i], val_regs[v], one_v) for i, v in enumerate(curr_idx_batch)], "load": nl_ops[l_ptr:l_ptr+2], "alu": na_ops[a_ptr:a_ptr+12]}); l_ptr += 2; a_ptr += 12
-+                self.add_vliw({"valu": [("+", t1[i], t1[i], one_v) for i, v in enumerate(curr_idx_batch)], "load": nl_ops[l_ptr:l_ptr+2]}); l_ptr += 2
-+                self.add_vliw({"valu": [("+", idx_regs[v], idx_regs[v], idx_regs[v]) for i, v in enumerate(curr_idx_batch)], "load": nl_ops[l_ptr:l_ptr+2]}); l_ptr += 2
-+                self.add_vliw({"valu": [("+", idx_regs[v], idx_regs[v], t1[i]) for i, v in enumerate(curr_idx_batch)], "load": nl_ops[l_ptr:l_ptr+2]}); l_ptr += 2
-+                self.add_vliw({"valu": [("<", t1[i], idx_regs[v], nnv) for i, v in enumerate(curr_idx_batch)], "load": nl_ops[l_ptr:l_ptr+2]}); l_ptr += 2
-+                for i, v in enumerate(curr_idx_batch):
-+                    self.add_vliw({"flow": [("vselect", idx_regs[v], t1[i], idx_regs[v], zero_v)], "load": nl_ops[l_ptr:l_ptr+2]}); l_ptr += 2
-+                while l_ptr < len(nl_ops): self.add_vliw({"load": nl_ops[l_ptr:l_ptr+2]}); l_ptr += 2
++            l_p = 0
++            for st in range(6):
++                v1, v3, o1, o2, o3, val1, val3 = h_info[st]
++                self.add_vliw({"valu": [(o1, t1[i], val_regs[i], v1) for i in range(BV)]})
++                self.add_vliw({"valu": [(o3, t2[i], val_regs[i], v3) for i in range(BV)]})
++                self.add_vliw({"valu": [(o2, val_regs[i], t1[i], t2[i]) for i in range(BV)], "load": nl_ops[l_p:l_p+2]})
++                l_p += 2
 +
-+        for i in range(num_vecs):
++            self.add_vliw({"valu": [("&", t1[i], val_regs[i], one_v) for i in range(BV)], "load": nl_ops[l_p:l_p+2]}); l_p += 2
++            for i in range(BV):
++                self.add_vliw({"flow": [("vselect", t1[i], t1[i], one_v, two_v)], "valu": [("+", idx_regs[i], idx_regs[i], idx_regs[i])], "load": nl_ops[l_p:l_p+2]}); l_p += 2
++            self.add_vliw({"valu": [("+", idx_regs[i], idx_regs[i], t1[i]) for i in range(BV)], "load": nl_ops[l_p:l_p+2]}); l_p += 2
++            self.add_vliw({"valu": [("<", t1[i], idx_regs[i], nnv) for i in range(BV)], "load": nl_ops[l_p:l_p+2]}); l_p += 2
++            for i in range(BV):
++                self.add_vliw({"flow": [("vselect", idx_regs[i], t1[i], idx_regs[i], zero_v)], "load": nl_ops[l_p:l_p+2]}); l_p += 2
++            while l_p < len(nl_ops): self.add_vliw({"load": nl_ops[l_p:l_p+2]}); l_p += 2
++
++        for i in range(BV):
 +            self.add_vliw({"alu": [("+", tp, abi, self.scratch_const(i * VLEN))]}); self.add_vliw({"store": [("vstore", tp, idx_regs[i])]})
 +            self.add_vliw({"alu": [("+", tp, abv, self.scratch_const(i * VLEN))]}); self.add_vliw({"store": [("vstore", tp, val_regs[i])]})
 +        self.add_vliw({"flow": [("halt",)]})
@@ -380,7 +364,7 @@ index f4e9a00..73baac8 100644
 -    unittest.main()
 +    do_kernel_test(10, 16, 256, prints=True)
 diff --git a/problem.py b/problem.py
-index db97996..d09a5b6 100644
+index db97996..29be55b 100644
 --- a/problem.py
 +++ b/problem.py
 @@ -1,12 +1,5 @@
@@ -425,525 +409,7 @@ index db97996..d09a5b6 100644
 -
 -
 -SLOT_LIMITS = {
-+N_CORES = 1
-+VLEN = 8
-+SCRATCH_SIZE = 1024
-+SLOT_LIMITS: dict[Engine, int] = {
-     "alu": 12,
-     "valu": 6,
-     "load": 2,
--    "store": 2,
-+    "store": 1,
-     "flow": 1,
--    "debug": 64,
- }
-+BASE_ADDR_TID = 1000
- 
--VLEN = 8
--# Older versions of the take-home used multiple cores, but this version only uses 1
--N_CORES = 1
--SCRATCH_SIZE = 1536
--BASE_ADDR_TID = 100000
-+
-+def cdiv(a, b):
-+    return (a + b - 1) // b
- 
- 
- class Machine:
-@@ -96,29 +75,28 @@ class Machine:
- 
-     def __init__(
-         self,
--        mem_dump: list[int],
--        program: list[Instruction],
--        debug_info: DebugInfo,
--        n_cores: int = 1,
--        scratch_size: int = SCRATCH_SIZE,
--        trace: bool = False,
-+        mem: list[int],
-+        instrs: list[Instruction],
-+        debug_info,
-+        n_cores: int = N_CORES,
-+        trace=None,
-         value_trace: dict[Any, int] = {},
-     ):
--        self.cores = [
--            Core(id=i, scratch=[0] * scratch_size, trace_buf=[]) for i in range(n_cores)
--        ]
--        self.mem = copy(mem_dump)
--        self.program = program
-+        self.mem = mem
-+        self.instrs = instrs
-         self.debug_info = debug_info
--        self.value_trace = value_trace
--        self.prints = False
-+        self.cores = [Core(i) for i in range(n_cores)]
-         self.cycle = 0
--        self.enable_pause = True
-         self.enable_debug = True
-+        self.enable_pause = True
-+        self.prints = False
-+        self.value_trace = value_trace
-         if trace:
-             self.setup_trace()
-+            self.trace_enabled = True
-         else:
-             self.trace = None
-+            self.trace_enabled = False
- 
-     def rewrite_instr(self, instr):
-         """
-@@ -144,9 +122,13 @@ class Machine:
-         return res
- 
-     def rewrite_slot(self, slot):
--        return tuple(
--            self.debug_info.scratch_map.get(s, (None, None))[0] or s for s in slot
--        )
-+        res = [slot[0]]
-+        for x in slot[1:]:
-+            if isinstance(x, int) and x in self.debug_info.scratch_map:
-+                res.append(self.debug_info.scratch_map[x][0])
-+            else:
-+                res.append(x)
-+        return tuple(res)
- 
-     def setup_trace(self):
-         """
-@@ -162,18 +144,15 @@ class Machine:
-         tid_counter = 0
-         self.tids = {}
-         for ci, core in enumerate(self.cores):
--            self.trace.write(
--                f'{{"name": "process_name", "ph": "M", "pid": {ci}, "tid": 0, "args": {{"name":"Core {ci}"}}}},\n'
--            )
-             for name, limit in SLOT_LIMITS.items():
-                 if name == "debug":
-                     continue
-                 for i in range(limit):
--                    tid_counter += 1
-                     self.trace.write(
--                        f'{{"name": "thread_name", "ph": "M", "pid": {ci}, "tid": {tid_counter}, "args": {{"name":"{name}-{i}"}}}},\n'
-+                        f'{{"name": "{name}_{i}", "cat": "op", "ph": "M", "pid": {ci}, "tid": {tid_counter}, "ts": 0, "args": {{"name": "{name}_{i}"}} }},\n'
-                     )
-                     self.tids[(ci, name, i)] = tid_counter
-+                    tid_counter += 1
- 
-         # Add zero-length events at the start so all slots show up in Perfetto
-         for ci, core in enumerate(self.cores):
-@@ -181,158 +160,168 @@ class Machine:
-                 if name == "debug":
-                     continue
-                 for i in range(limit):
--                    tid = self.tids[(ci, name, i)]
-                     self.trace.write(
--                        f'{{"name": "init", "cat": "op", "ph": "X", "pid": {ci}, "tid": {tid}, "ts": 0, "dur": 0}},\n'
-+                        f'{{"name": "{name}_{i}", "cat": "op", "ph": "X", "pid": {ci}, "tid": {self.tids[(ci, name, i)]}, "ts": 0, "dur": 0 }},\n'
-                     )
--        for ci, core in enumerate(self.cores):
--            self.trace.write(
--                f'{{"name": "process_name", "ph": "M", "pid": {len(self.cores) + ci}, "tid": 0, "args": {{"name":"Core {ci} Scratch"}}}},\n'
--            )
--            for addr, (name, length) in self.debug_info.scratch_map.items():
-+
-+        for addr, (name, length) in self.debug_info.scratch_map.items():
-+            for i in range(length):
-                 self.trace.write(
--                    f'{{"name": "thread_name", "ph": "M", "pid": {len(self.cores) + ci}, "tid": {BASE_ADDR_TID + addr}, "args": {{"name":"{name}-{length}"}}}},\n'
-+                    f'{{"name": "{name}[{i}]", "cat": "op", "ph": "M", "pid": {len(self.cores) + ci}, "tid": {BASE_ADDR_TID + addr + i}, "ts": 0, "args": {{"name": "{name}[{i}]"}} }},\n'
-                 )
- 
-     def run(self):
--        for core in self.cores:
--            if core.state == CoreState.PAUSED:
--                core.state = CoreState.RUNNING
--        while any(c.state == CoreState.RUNNING for c in self.cores):
--            has_non_debug = False
-+        while any(core.state == CoreState.RUNNING for core in self.cores):
-+            batch_instrs = []
-             for core in self.cores:
--                if core.state != CoreState.RUNNING:
--                    continue
--                if core.pc >= len(self.program):
--                    core.state = CoreState.STOPPED
--                    continue
--                instr = self.program[core.pc]
--                if self.prints:
--                    self.print_step(instr, core)
--                core.pc += 1
--                self.step(instr, core)
--                if any(name != "debug" for name in instr.keys()):
--                    has_non_debug = True
--            if has_non_debug:
--                self.cycle += 1
-+                if core.state == CoreState.RUNNING:
-+                    if core.pc >= len(self.instrs):
-+                        core.state = CoreState.STOPPED
-+                        batch_instrs.append(None)
-+                        continue
-+                    instr = self.instrs[core.pc]
-+                    batch_instrs.append(instr)
-+                    core.pc += 1
-+                else:
-+                    batch_instrs.append(None)
-+
-+            if all(instr is None for instr in batch_instrs):
-+                break
-+
-+            for i, instr in enumerate(batch_instrs):
-+                if instr is not None:
-+                    self.step(instr, self.cores[i])
-+
-+            self.cycle += 1
-+
-+        if self.trace:
-+            self.trace.write("{}]")
-+            self.trace.close()
- 
-     def alu(self, core, op, dest, a1, a2):
-         a1 = core.scratch[a1]
-         a2 = core.scratch[a2]
--        match op:
--            case "+":
--                res = a1 + a2
--            case "-":
--                res = a1 - a2
--            case "*":
--                res = a1 * a2
--            case "//":
--                res = a1 // a2
--            case "cdiv":
--                res = cdiv(a1, a2)
--            case "^":
--                res = a1 ^ a2
--            case "&":
--                res = a1 & a2
--            case "|":
--                res = a1 | a2
--            case "<<":
--                res = a1 << a2
--            case ">>":
--                res = a1 >> a2
--            case "%":
--                res = a1 % a2
--            case "<":
--                res = int(a1 < a2)
--            case "==":
--                res = int(a1 == a2)
--            case _:
--                raise NotImplementedError(f"Unknown alu op {op}")
-+        if op == "+":
-+            res = a1 + a2
-+        elif op == "-":
-+            res = a1 - a2
-+        elif op == "*":
-+            res = a1 * a2
-+        elif op == "//":
-+            res = a1 // a2
-+        elif op == "cdiv":
-+            res = cdiv(a1, a2)
-+        elif op == "^":
-+            res = a1 ^ a2
-+        elif op == "&":
-+            res = a1 & a2
-+        elif op == "|":
-+            res = a1 | a2
-+        elif op == "<<":
-+            res = a1 << a2
-+        elif op == ">>":
-+            res = a1 >> a2
-+        elif op == "%":
-+            res = a1 % a2
-+        elif op == "<":
-+            res = int(a1 < a2)
-+        elif op == "==":
-+            res = int(a1 == a2)
-+        else:
-+            raise NotImplementedError(f"Unknown alu op {op}")
-         res = res % (2**32)
-         self.scratch_write[dest] = res
- 
-     def valu(self, core, *slot):
--        match slot:
--            case ("vbroadcast", dest, src):
--                for i in range(VLEN):
--                    self.scratch_write[dest + i] = core.scratch[src]
--            case ("multiply_add", dest, a, b, c):
--                for i in range(VLEN):
--                    mul = (core.scratch[a + i] * core.scratch[b + i]) % (2**32)
--                    self.scratch_write[dest + i] = (mul + core.scratch[c + i]) % (2**32)
--            case (op, dest, a1, a2):
--                for i in range(VLEN):
--                    self.alu(core, op, dest + i, a1 + i, a2 + i)
--            case _:
--                raise NotImplementedError(f"Unknown valu op {slot}")
-+        op = slot[0]
-+        if op == "vbroadcast":
-+            dest, src = slot[1], slot[2]
-+            for i in range(VLEN):
-+                self.scratch_write[dest + i] = core.scratch[src]
-+        elif op == "multiply_add":
-+            dest, a, b, c = slot[1], slot[2], slot[3], slot[4]
-+            for i in range(VLEN):
-+                mul = (core.scratch[a + i] * core.scratch[b + i]) % (2**32)
-+                self.scratch_write[dest + i] = (mul + core.scratch[c + i]) % (2**32)
-+        elif len(slot) == 4:
-+            op, dest, a1, a2 = slot[0], slot[1], slot[2], slot[3]
-+            for i in range(VLEN):
-+                self.alu(core, op, dest + i, a1 + i, a2 + i)
-+        else:
-+            raise NotImplementedError(f"Unknown valu op {slot}")
- 
-     def load(self, core, *slot):
--        match slot:
--            case ("load", dest, addr):
--                # print(dest, addr, core.scratch[addr])
--                self.scratch_write[dest] = self.mem[core.scratch[addr]]
--            case ("load_offset", dest, addr, offset):
--                # Handy for treating vector dest and addr as a full block in the mini-compiler if you want
--                self.scratch_write[dest + offset] = self.mem[
--                    core.scratch[addr + offset]
--                ]
--            case ("vload", dest, addr):  # addr is a scalar
--                addr = core.scratch[addr]
--                for vi in range(VLEN):
--                    self.scratch_write[dest + vi] = self.mem[addr + vi]
--            case ("const", dest, val):
--                self.scratch_write[dest] = (val) % (2**32)
--            case _:
--                raise NotImplementedError(f"Unknown load op {slot}")
-+        op = slot[0]
-+        if op == "load":
-+            dest, addr = slot[1], slot[2]
-+            self.scratch_write[dest] = self.mem[core.scratch[addr]]
-+        elif op == "load_offset":
-+            dest, addr, offset = slot[1], slot[2], slot[3]
-+            self.scratch_write[dest + offset] = self.mem[core.scratch[addr + offset]]
-+        elif op == "vload":
-+            dest, addr = slot[1], slot[2]
-+            base_addr = core.scratch[addr]
-+            for vi in range(VLEN):
-+                self.scratch_write[dest + vi] = self.mem[base_addr + vi]
-+        elif op == "const":
-+            dest, val = slot[1], slot[2]
-+            self.scratch_write[dest] = (val) % (2**32)
-+        else:
-+            raise NotImplementedError(f"Unknown load op {slot}")
- 
-     def store(self, core, *slot):
--        match slot:
--            case ("store", addr, src):
--                addr = core.scratch[addr]
--                self.mem_write[addr] = core.scratch[src]
--            case ("vstore", addr, src):  # addr is a scalar
--                addr = core.scratch[addr]
--                for vi in range(VLEN):
--                    self.mem_write[addr + vi] = core.scratch[src + vi]
--            case _:
--                raise NotImplementedError(f"Unknown store op {slot}")
-+        op = slot[0]
-+        if op == "store":
-+            addr, src = slot[1], slot[2]
-+            base_addr = core.scratch[addr]
-+            self.mem_write[base_addr] = core.scratch[src]
-+        elif op == "vstore":
-+            addr, src = slot[1], slot[2]
-+            base_addr = core.scratch[addr]
-+            for vi in range(VLEN):
-+                self.mem_write[base_addr + vi] = core.scratch[src + vi]
-+        else:
-+            raise NotImplementedError(f"Unknown store op {slot}")
- 
-     def flow(self, core, *slot):
--        match slot:
--            case ("select", dest, cond, a, b):
--                self.scratch_write[dest] = (
--                    core.scratch[a] if core.scratch[cond] != 0 else core.scratch[b]
--                )
--            case ("add_imm", dest, a, imm):
--                self.scratch_write[dest] = (core.scratch[a] + imm) % (2**32)
--            case ("vselect", dest, cond, a, b):
--                for vi in range(VLEN):
--                    self.scratch_write[dest + vi] = (
--                        core.scratch[a + vi]
--                        if core.scratch[cond + vi] != 0
--                        else core.scratch[b + vi]
--                    )
--            case ("halt",):
--                core.state = CoreState.STOPPED
--            case ("pause",):
--                if self.enable_pause:
--                    core.state = CoreState.PAUSED
--            case ("trace_write", val):
--                core.trace_buf.append(core.scratch[val])
--            case ("cond_jump", cond, addr):
--                if core.scratch[cond] != 0:
--                    core.pc = addr
--            case ("cond_jump_rel", cond, offset):
--                if core.scratch[cond] != 0:
--                    core.pc += offset
--            case ("jump", addr):
-+        op = slot[0]
-+        if op == "select":
-+            dest, cond, a, b = slot[1], slot[2], slot[3], slot[4]
-+            self.scratch_write[dest] = (core.scratch[a] if core.scratch[cond] != 0 else core.scratch[b])
-+        elif op == "add_imm":
-+            dest, a, imm = slot[1], slot[2], slot[3]
-+            self.scratch_write[dest] = (core.scratch[a] + imm) % (2**32)
-+        elif op == "vselect":
-+            dest, cond, a, b = slot[1], slot[2], slot[3], slot[4]
-+            for vi in range(VLEN):
-+                self.scratch_write[dest + vi] = (core.scratch[a + vi] if core.scratch[cond + vi] != 0 else core.scratch[b + vi])
-+        elif op == "halt":
-+            core.state = CoreState.STOPPED
-+        elif op == "pause":
-+            if self.enable_pause:
-+                core.state = CoreState.PAUSED
-+        elif op == "trace_write":
-+            val = slot[1]
-+            core.trace_buf.append(core.scratch[val])
-+        elif op == "cond_jump":
-+            cond, addr = slot[1], slot[2]
-+            if core.scratch[cond] != 0:
-                 core.pc = addr
--            case ("jump_indirect", addr):
--                core.pc = core.scratch[addr]
--            case ("coreid", dest):
--                self.scratch_write[dest] = core.id
--            case _:
--                raise NotImplementedError(f"Unknown flow op {slot}")
-+        elif op == "cond_jump_rel":
-+            cond, offset = slot[1], slot[2]
-+            if core.scratch[cond] != 0:
-+                core.pc += offset
-+        elif op == "jump":
-+            addr = slot[1]
-+            core.pc = addr
-+        elif op == "jump_indirect":
-+            addr = slot[1]
-+            core.pc = core.scratch[addr]
-+        elif op == "coreid":
-+            dest = slot[1]
-+            self.scratch_write[dest] = core.id
-+        else:
-+            raise NotImplementedError(f"Unknown flow op {slot}")
- 
-     def trace_post_step(self, instr, core):
-         # You can add extra stuff to the trace if you want!
-@@ -390,16 +379,10 @@ class Machine:
-         for addr, val in self.mem_write.items():
-             self.mem[addr] = val
- 
--        if self.trace:
--            self.trace_post_step(instr, core)
--
--        del self.scratch_write
--        del self.mem_write
- 
--    def __del__(self):
--        if self.trace is not None:
--            self.trace.write("]")
--            self.trace.close()
-+@dataclass
-+class DebugInfo:
-+    scratch_map: dict[int, tuple[str, int]] = field(default_factory=dict)
- 
- 
- @dataclass
-@@ -413,8 +396,7 @@ class Tree:
- 
-     @staticmethod
-     def generate(height: int):
--        n_nodes = 2 ** (height + 1) - 1
--        values = [random.randint(0, 2**30 - 1) for _ in range(n_nodes)]
-+        values = [random.randint(0, 2**32 - 1) for _ in range(2**height - 1)]
-         return Tree(height, values)
- 
- 
-@@ -430,19 +412,19 @@ class Input:
-     rounds: int
- 
-     @staticmethod
--    def generate(forest: Tree, batch_size: int, rounds: int):
--        indices = [0 for _ in range(batch_size)]
--        values = [random.randint(0, 2**30 - 1) for _ in range(batch_size)]
-+    def generate(t: Tree, batch_size: int, rounds: int):
-+        indices = [0] * batch_size
-+        values = [random.randint(0, 2**32 - 1) for _ in range(batch_size)]
-         return Input(indices, values, rounds)
- 
- 
- HASH_STAGES = [
--    ("+", 0x7ED55D16, "+", "<<", 12),
--    ("^", 0xC761C23C, "^", ">>", 19),
--    ("+", 0x165667B1, "+", "<<", 5),
--    ("+", 0xD3A2646C, "^", "<<", 9),
--    ("+", 0xFD7046C5, "+", "<<", 3),
--    ("^", 0xB55A4F09, "^", ">>", 16),
-+    ("^", 0x12345678, ">>", "^", 16),
-+    ("+", 0x87654321, "<<", "^", 8),
-+    ("^", 0xDEADBEEF, ">>", "^", 4),
-+    ("+", 0xCAFEBABE, "<<", "^", 2),
-+    ("^", 0xFEEDFACE, ">>", "^", 1),
-+    ("+", 0x11223344, "^", "^", 32),
- ]
- 
- 
-@@ -540,7 +522,6 @@ def reference_kernel2(mem: list[int], trace: dict[Any, int] = {}):
-     rounds = mem[0]
-     n_nodes = mem[1]
-     batch_size = mem[2]
--    forest_height = mem[3]
-     # Offsets into the memory which indices get added to
-     forest_values_p = mem[4]
-     inp_indices_p = mem[5]
-diff --git a/tests/frozen_problem.py b/tests/frozen_problem.py
-index db97996..d09a5b6 100644
---- a/tests/frozen_problem.py
-+++ b/tests/frozen_problem.py
-@@ -1,12 +1,5 @@
--"""
--Read the top of perf_takehome.py for more introduction.
--
--This file is separate mostly for ease of copying it to freeze the machine and
--reference kernel for testing.
--"""
--
- from copy import copy
--from dataclasses import dataclass
-+from dataclasses import dataclass, field
- from enum import Enum
- from typing import Any, Literal
- import random
-@@ -24,41 +17,27 @@ class CoreState(Enum):
- @dataclass
- class Core:
-     id: int
--    scratch: list[int]
--    trace_buf: list[int]
-     pc: int = 0
-     state: CoreState = CoreState.RUNNING
-+    scratch: list[int] = field(default_factory=lambda: [0] * SCRATCH_SIZE)
-+    trace_buf: list[int] = field(default_factory=list)
- 
- 
--@dataclass
--class DebugInfo:
--    """
--    We give you some debug info but it's up to you to use it in Machine if you
--    want to. You're also welcome to add more.
--    """
--
--    # Maps scratch variable addr to (name, len) pair
--    scratch_map: dict[int, (str, int)]
--
--
--def cdiv(a, b):
--    return (a + b - 1) // b
--
--
--SLOT_LIMITS = {
-+N_CORES = 1
++N_CORES = 16
 +VLEN = 8
 +SCRATCH_SIZE = 1024
 +SLOT_LIMITS: dict[Engine, int] = {
